@@ -1,0 +1,534 @@
+-- ==========================================================
+-- BANKING MANAGEMENT SYSTEM
+-- ADBMS PROJECT - MYSQL WORKBENCH 8.0
+-- ==========================================================
+
+CREATE DATABASE IF NOT EXISTS BANKING_DB;
+USE BANKING_DB;
+
+-- ==========================================================
+-- 1. DROP OLD PROCEDURES, FUNCTION AND TRIGGER
+-- ==========================================================
+
+DROP PROCEDURE IF EXISTS ADD_CUSTOMER;
+DROP PROCEDURE IF EXISTS OPEN_ACCOUNT;
+DROP PROCEDURE IF EXISTS DEPOSIT_MONEY;
+DROP PROCEDURE IF EXISTS WITHDRAW_MONEY;
+DROP PROCEDURE IF EXISTS TRANSFER_MONEY;
+DROP PROCEDURE IF EXISTS SHOW_HISTORY;
+
+DROP FUNCTION IF EXISTS CHECK_BALANCE;
+
+DROP TRIGGER IF EXISTS CHECK_TRANSACTION;
+
+-- ==========================================================
+-- 2. DROP OLD TABLES
+-- ==========================================================
+
+DROP TABLE IF EXISTS TRANSACTIONS;
+DROP TABLE IF EXISTS ACCOUNTS;
+DROP TABLE IF EXISTS CUSTOMERS;
+
+-- ==========================================================
+-- 3. CREATE TABLES
+-- ==========================================================
+
+CREATE TABLE CUSTOMERS (
+    CUSTOMER_ID INT AUTO_INCREMENT PRIMARY KEY,
+    CUSTOMER_NAME VARCHAR(100) NOT NULL,
+    PHONE VARCHAR(15),
+    EMAIL VARCHAR(100),
+    ADDRESS VARCHAR(200)
+);
+
+CREATE TABLE ACCOUNTS (
+    ACCOUNT_ID INT AUTO_INCREMENT PRIMARY KEY,
+    CUSTOMER_ID INT NOT NULL,
+    ACCOUNT_NUMBER VARCHAR(20) UNIQUE NOT NULL,
+    ACCOUNT_TYPE VARCHAR(20) NOT NULL,
+    BALANCE DECIMAL(12,2) DEFAULT 0.00,
+    STATUS VARCHAR(15) DEFAULT 'ACTIVE',
+
+    FOREIGN KEY (CUSTOMER_ID)
+    REFERENCES CUSTOMERS(CUSTOMER_ID)
+);
+
+CREATE TABLE TRANSACTIONS (
+    TRANSACTION_ID INT AUTO_INCREMENT PRIMARY KEY,
+    ACCOUNT_ID INT NOT NULL,
+    TRANSACTION_TYPE VARCHAR(20),
+    AMOUNT DECIMAL(12,2) NOT NULL,
+    TRANSACTION_DATE DATETIME DEFAULT CURRENT_TIMESTAMP,
+    DESCRIPTION VARCHAR(200),
+
+    FOREIGN KEY (ACCOUNT_ID)
+    REFERENCES ACCOUNTS(ACCOUNT_ID)
+);
+
+-- ==========================================================
+-- 4. CREATE TRIGGER
+-- ==========================================================
+
+DELIMITER $$
+
+CREATE TRIGGER CHECK_TRANSACTION
+BEFORE INSERT ON TRANSACTIONS
+FOR EACH ROW
+BEGIN
+    IF NEW.AMOUNT <= 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT =
+        'Amount must be greater than zero';
+    END IF;
+END$$
+
+DELIMITER ;
+
+-- ==========================================================
+-- 5. CUSTOMER REGISTRATION PROCEDURE
+-- ==========================================================
+
+DELIMITER $$
+
+CREATE PROCEDURE ADD_CUSTOMER(
+    IN P_NAME VARCHAR(100),
+    IN P_PHONE VARCHAR(15),
+    IN P_EMAIL VARCHAR(100),
+    IN P_ADDRESS VARCHAR(200)
+)
+BEGIN
+
+    INSERT INTO CUSTOMERS
+    (CUSTOMER_NAME, PHONE, EMAIL, ADDRESS)
+    VALUES
+    (P_NAME, P_PHONE, P_EMAIL, P_ADDRESS);
+
+    SELECT LAST_INSERT_ID() AS CUSTOMER_ID,
+           'Customer registered successfully' AS MESSAGE;
+
+END$$
+
+DELIMITER ;
+
+-- ==========================================================
+-- 6. OPEN BANK ACCOUNT PROCEDURE
+-- ==========================================================
+
+DELIMITER $$
+
+CREATE PROCEDURE OPEN_ACCOUNT(
+    IN P_CUSTOMER_ID INT,
+    IN P_TYPE VARCHAR(20),
+    IN P_BALANCE DECIMAL(12,2)
+)
+BEGIN
+
+    DECLARE V_ACCOUNT_ID INT;
+    DECLARE V_COUNT INT;
+
+    SELECT COUNT(*) INTO V_COUNT
+    FROM CUSTOMERS
+    WHERE CUSTOMER_ID = P_CUSTOMER_ID;
+
+    IF V_COUNT = 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Customer does not exist';
+    END IF;
+
+    IF P_BALANCE < 0 OR P_BALANCE IS NULL THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Invalid initial balance';
+    END IF;
+
+    INSERT INTO ACCOUNTS
+    (CUSTOMER_ID, ACCOUNT_NUMBER, ACCOUNT_TYPE,
+     BALANCE, STATUS)
+    VALUES
+    (P_CUSTOMER_ID, 'TEMP', P_TYPE, P_BALANCE, 'ACTIVE');
+
+    SET V_ACCOUNT_ID = LAST_INSERT_ID();
+
+    UPDATE ACCOUNTS
+    SET ACCOUNT_NUMBER =
+        CONCAT('AC', LPAD(V_ACCOUNT_ID, 8, '0'))
+    WHERE ACCOUNT_ID = V_ACCOUNT_ID;
+
+    SELECT V_ACCOUNT_ID AS ACCOUNT_ID,
+           CONCAT('AC', LPAD(V_ACCOUNT_ID, 8, '0'))
+           AS ACCOUNT_NUMBER,
+           'Account created successfully' AS MESSAGE;
+
+END$$
+
+DELIMITER ;
+
+-- ==========================================================
+-- 7. DEPOSIT MONEY PROCEDURE
+-- ==========================================================
+
+DELIMITER $$
+
+CREATE PROCEDURE DEPOSIT_MONEY(
+    IN P_ID INT,
+    IN P_AMOUNT DECIMAL(12,2)
+)
+BEGIN
+
+    DECLARE V_STATUS VARCHAR(15);
+    DECLARE V_COUNT INT;
+
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    IF P_AMOUNT IS NULL OR P_AMOUNT <= 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Invalid deposit amount';
+    END IF;
+
+    START TRANSACTION;
+
+    SELECT COUNT(*) INTO V_COUNT
+    FROM ACCOUNTS
+    WHERE ACCOUNT_ID = P_ID;
+
+    IF V_COUNT = 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Account does not exist';
+    END IF;
+
+    SELECT STATUS INTO V_STATUS
+    FROM ACCOUNTS
+    WHERE ACCOUNT_ID = P_ID
+    FOR UPDATE;
+
+    IF V_STATUS <> 'ACTIVE' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Account is inactive';
+    END IF;
+
+    UPDATE ACCOUNTS
+    SET BALANCE = BALANCE + P_AMOUNT
+    WHERE ACCOUNT_ID = P_ID;
+
+    INSERT INTO TRANSACTIONS
+    (ACCOUNT_ID, TRANSACTION_TYPE, AMOUNT, DESCRIPTION)
+    VALUES
+    (P_ID, 'DEPOSIT', P_AMOUNT, 'Money deposited');
+
+    COMMIT;
+
+    SELECT 'Deposit successful' AS MESSAGE;
+
+END$$
+
+DELIMITER ;
+
+-- ==========================================================
+-- 8. WITHDRAW MONEY PROCEDURE
+-- ==========================================================
+
+DELIMITER $$
+
+CREATE PROCEDURE WITHDRAW_MONEY(
+    IN P_ID INT,
+    IN P_AMOUNT DECIMAL(12,2)
+)
+BEGIN
+
+    DECLARE V_BALANCE DECIMAL(12,2);
+    DECLARE V_STATUS VARCHAR(15);
+    DECLARE V_COUNT INT;
+
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    IF P_AMOUNT IS NULL OR P_AMOUNT <= 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Invalid withdrawal amount';
+    END IF;
+
+    START TRANSACTION;
+
+    SELECT COUNT(*) INTO V_COUNT
+    FROM ACCOUNTS
+    WHERE ACCOUNT_ID = P_ID;
+
+    IF V_COUNT = 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Account does not exist';
+    END IF;
+
+    SELECT BALANCE, STATUS
+    INTO V_BALANCE, V_STATUS
+    FROM ACCOUNTS
+    WHERE ACCOUNT_ID = P_ID
+    FOR UPDATE;
+
+    IF V_STATUS <> 'ACTIVE' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Account is inactive';
+    END IF;
+
+    IF V_BALANCE < P_AMOUNT THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Insufficient balance';
+    END IF;
+
+    UPDATE ACCOUNTS
+    SET BALANCE = BALANCE - P_AMOUNT
+    WHERE ACCOUNT_ID = P_ID;
+
+    INSERT INTO TRANSACTIONS
+    (ACCOUNT_ID, TRANSACTION_TYPE, AMOUNT, DESCRIPTION)
+    VALUES
+    (P_ID, 'WITHDRAWAL', P_AMOUNT, 'Money withdrawn');
+
+    COMMIT;
+
+    SELECT 'Withdrawal successful' AS MESSAGE;
+
+END$$
+
+DELIMITER ;
+
+-- ==========================================================
+-- 9. FUND TRANSFER PROCEDURE
+-- ==========================================================
+
+DELIMITER $$
+
+CREATE PROCEDURE TRANSFER_MONEY(
+    IN P_FROM INT,
+    IN P_TO INT,
+    IN P_AMOUNT DECIMAL(12,2)
+)
+BEGIN
+
+    DECLARE V_BALANCE DECIMAL(12,2);
+    DECLARE V_FROM_STATUS VARCHAR(15);
+    DECLARE V_TO_STATUS VARCHAR(15);
+    DECLARE V_COUNT INT;
+
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+
+    IF P_AMOUNT IS NULL OR P_AMOUNT <= 0
+       OR P_FROM = P_TO THEN
+
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Invalid transfer details';
+
+    END IF;
+
+    START TRANSACTION;
+
+    SELECT COUNT(*) INTO V_COUNT
+    FROM ACCOUNTS
+    WHERE ACCOUNT_ID IN (P_FROM, P_TO);
+
+    IF V_COUNT <> 2 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'One or both accounts do not exist';
+    END IF;
+
+    SELECT BALANCE, STATUS
+    INTO V_BALANCE, V_FROM_STATUS
+    FROM ACCOUNTS
+    WHERE ACCOUNT_ID = P_FROM
+    FOR UPDATE;
+
+    SELECT STATUS INTO V_TO_STATUS
+    FROM ACCOUNTS
+    WHERE ACCOUNT_ID = P_TO
+    FOR UPDATE;
+
+    IF V_FROM_STATUS <> 'ACTIVE'
+       OR V_TO_STATUS <> 'ACTIVE' THEN
+
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Both accounts must be active';
+
+    END IF;
+
+    IF V_BALANCE < P_AMOUNT THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Insufficient balance';
+    END IF;
+
+    UPDATE ACCOUNTS
+    SET BALANCE = BALANCE - P_AMOUNT
+    WHERE ACCOUNT_ID = P_FROM;
+
+    UPDATE ACCOUNTS
+    SET BALANCE = BALANCE + P_AMOUNT
+    WHERE ACCOUNT_ID = P_TO;
+
+    INSERT INTO TRANSACTIONS
+    (ACCOUNT_ID, TRANSACTION_TYPE, AMOUNT, DESCRIPTION)
+    VALUES
+    (P_FROM, 'TRANSFER OUT', P_AMOUNT,
+     'Amount transferred');
+
+    INSERT INTO TRANSACTIONS
+    (ACCOUNT_ID, TRANSACTION_TYPE, AMOUNT, DESCRIPTION)
+    VALUES
+    (P_TO, 'TRANSFER IN', P_AMOUNT,
+     'Amount received');
+
+    COMMIT;
+
+    SELECT 'Fund transfer successful' AS MESSAGE;
+
+END$$
+
+DELIMITER ;
+
+-- ==========================================================
+-- 10. BALANCE ENQUIRY FUNCTION
+-- ==========================================================
+
+DELIMITER $$
+
+CREATE FUNCTION CHECK_BALANCE(
+    P_ID INT
+)
+RETURNS DECIMAL(12,2)
+READS SQL DATA
+BEGIN
+
+    DECLARE V_BALANCE DECIMAL(12,2);
+
+    SELECT BALANCE INTO V_BALANCE
+    FROM ACCOUNTS
+    WHERE ACCOUNT_ID = P_ID;
+
+    RETURN V_BALANCE;
+
+END$$
+
+DELIMITER ;
+
+-- ==========================================================
+-- 11. TRANSACTION HISTORY USING CURSOR
+-- ==========================================================
+
+DELIMITER $$
+
+CREATE PROCEDURE SHOW_HISTORY(
+    IN P_ID INT
+)
+BEGIN
+
+    DECLARE V_DONE INT DEFAULT 0;
+    DECLARE V_TID INT;
+    DECLARE V_TYPE VARCHAR(20);
+    DECLARE V_AMOUNT DECIMAL(12,2);
+    DECLARE V_DATE DATETIME;
+
+    DECLARE C_HISTORY CURSOR FOR
+        SELECT TRANSACTION_ID,
+               TRANSACTION_TYPE,
+               AMOUNT,
+               TRANSACTION_DATE
+        FROM TRANSACTIONS
+        WHERE ACCOUNT_ID = P_ID
+        ORDER BY TRANSACTION_ID;
+
+    DECLARE CONTINUE HANDLER FOR NOT FOUND
+        SET V_DONE = 1;
+
+    OPEN C_HISTORY;
+
+    HISTORY_LOOP: LOOP
+
+        FETCH C_HISTORY
+        INTO V_TID, V_TYPE, V_AMOUNT, V_DATE;
+
+        IF V_DONE = 1 THEN
+            LEAVE HISTORY_LOOP;
+        END IF;
+
+        SELECT V_TID AS TRANSACTION_ID,
+               V_TYPE AS TRANSACTION_TYPE,
+               V_AMOUNT AS AMOUNT,
+               V_DATE AS TRANSACTION_DATE;
+
+    END LOOP;
+
+    CLOSE C_HISTORY;
+
+END$$
+
+DELIMITER ;
+
+-- ==========================================================
+-- 12. TESTING THE BANKING MANAGEMENT SYSTEM
+-- ==========================================================
+
+-- REGISTER CUSTOMERS
+
+CALL ADD_CUSTOMER(
+    'Rahul Sharma',
+    '9876543210',
+    'rahul@gmail.com',
+    'Ludhiana Punjab'
+);
+
+CALL ADD_CUSTOMER(
+    'Aman Kumar',
+    '9876543211',
+    'aman@gmail.com',
+    'Chandigarh Punjab'
+);
+
+-- CREATE BANK ACCOUNTS
+
+CALL OPEN_ACCOUNT(1, 'SAVINGS', 5000);
+CALL OPEN_ACCOUNT(2, 'CURRENT', 3000);
+
+-- DEPOSIT MONEY
+
+CALL DEPOSIT_MONEY(1, 2000);
+
+-- WITHDRAW MONEY
+
+CALL WITHDRAW_MONEY(1, 1000);
+
+-- TRANSFER MONEY
+
+CALL TRANSFER_MONEY(1, 2, 1500);
+
+-- CHECK ACCOUNT BALANCES
+
+SELECT CHECK_BALANCE(1) AS ACCOUNT_1_BALANCE;
+SELECT CHECK_BALANCE(2) AS ACCOUNT_2_BALANCE;
+
+-- VIEW TRANSACTION HISTORY
+
+CALL SHOW_HISTORY(1);
+CALL SHOW_HISTORY(2);
+
+-- DISPLAY ALL CUSTOMER RECORDS
+
+SELECT * FROM CUSTOMERS;
+
+-- DISPLAY ALL ACCOUNT RECORDS
+
+SELECT * FROM ACCOUNTS;
+
+-- DISPLAY ALL TRANSACTION RECORDS
+
+SELECT * FROM TRANSACTIONS;
+
+-- ==========================================================
+-- END OF BANKING MANAGEMENT SYSTEM
+-- ==========================================================
